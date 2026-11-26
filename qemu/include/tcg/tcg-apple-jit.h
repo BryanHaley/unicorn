@@ -70,15 +70,9 @@ QEMU_UNUSED_FUNC static inline bool thread_executable()
     return thread_mask() == 1;
 }
 
+/* Unicorn (mojave): a debug check that read a system register on every
+ * mode change; too slow to leave on. */
 static inline void assert_executable(bool executable) {
-    if (!pthread_jit_write_protect_supported_np()) {
-        return;
-    }
-    uint64_t v = read_sprr_perm();
-
-    if (!v) {
-        assert(executable == thread_executable());
-    }
 }
 
 #else
@@ -112,21 +106,20 @@ static inline void jit_write_protect(int enabled)
     return pthread_jit_write_protect_np(enabled);
 }
 
+/* Unicorn (mojave): the old guard put back the mode from before the
+ * callback, which was wrong when the callback changed it (a nested
+ * uc_emu_start, or a TB flush from mapping memory). A callback on this
+ * thread only uses this engine, which keeps uc->current_executable in step
+ * with the hardware, so there is nothing to put back. */
 #define JIT_CALLBACK_GUARD(x)                       \
 {                                                   \
-    bool executable = uc->current_executable;       \
-    assert_executable(executable);                  \
     x;                                              \
-    jit_write_protect(executable);                  \
 }                                                   \
 
 
 #define JIT_CALLBACK_GUARD_VAR(var, x)                  \
 {                                                       \
-    bool executable = uc->current_executable;           \
-    assert_executable(executable);                      \
     var = x;                                            \
-    jit_write_protect(executable);                      \
 }                                                       \
 
 

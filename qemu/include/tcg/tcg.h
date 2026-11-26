@@ -690,6 +690,7 @@ struct TCGContext {
     TBContext tb_ctx;
     /* qemu/include/exec/gen-icount.h */
     TCGOp *icount_start_insn;
+    TCGLabel *exitreq_label; /* Unicorn (mojave): inline exit check */
     /* qemu/tcg/tcg.c */
     GHashTable *helper_table;
     GHashTable *custom_helper_infos; // To support inline hooks.
@@ -947,7 +948,10 @@ static inline bool tcg_op_buf_full(TCGContext *tcg_ctx)
      * 16-bit unsigned offsets, TranslationBlock.jmp_reset_offset[]
      * and TCGContext.gen_insn_end_off[].
      */
-    return tcg_ctx->nb_ops >= 4000;
+    /* Unicorn (mojave): also stop before running out of temps. Some x87
+     * instructions leak a temp each, and a long run of them overflowed
+     * temps[] into the op list. */
+    return tcg_ctx->nb_ops >= 4000 || tcg_ctx->nb_temps >= TCG_MAX_TEMPS - 128;
 }
 
 /* pool based memory allocation */

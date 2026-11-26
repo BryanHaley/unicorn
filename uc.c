@@ -1263,6 +1263,39 @@ uc_err uc_emu_stop(uc_engine *uc)
     return err;
 }
 
+UNICORN_EXPORT
+void uc_mojave_request_stop(uc_engine *uc)
+{
+    uc->stop_request = true;
+    break_translation_loop(uc);
+}
+
+UNICORN_EXPORT
+void uc_mojave_no_exit_checks(uc_engine *uc)
+{
+    uc->no_exit_request = true;
+}
+
+UNICORN_EXPORT
+int uc_mojave_jit_write_begin(void)
+{
+    int prev = thread_executable();
+    jit_write_protect(false);
+    return prev;
+}
+
+UNICORN_EXPORT
+void uc_mojave_jit_write_end(int prev)
+{
+    jit_write_protect(prev);
+}
+
+UNICORN_EXPORT
+uint64_t uc_mojave_invalid_addr(uc_engine *uc)
+{
+    return uc->invalid_addr;
+}
+
 // return target index where a memory region at the address exists, or could be
 // inserted
 //

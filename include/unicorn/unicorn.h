@@ -1060,6 +1060,34 @@ UNICORN_EXPORT
 uc_err uc_emu_stop(uc_engine *uc);
 
 /*
+ Unicorn (mojave): ask a running engine to stop at its next block boundary.
+ Unlike uc_emu_stop, this is safe to call from another thread.
+*/
+UNICORN_EXPORT
+void uc_mojave_request_stop(uc_engine *uc);
+
+/*
+ Unicorn (mojave): don't check for stop requests after every memory access,
+ only between blocks. Needs no memory hooks to be installed.
+*/
+UNICORN_EXPORT
+void uc_mojave_no_exit_checks(uc_engine *uc);
+
+/*
+ Unicorn (mojave): on Apple Silicon, make this thread's JIT memory writable
+ (to change mappings that other engines have translated code for) and put
+ back whatever mode it was in. Returns the previous mode for the second call.
+*/
+UNICORN_EXPORT
+int uc_mojave_jit_write_begin(void);
+UNICORN_EXPORT
+void uc_mojave_jit_write_end(int prev);
+
+/* Unicorn (mojave): the address of the last invalid memory access. */
+UNICORN_EXPORT
+uint64_t uc_mojave_invalid_addr(uc_engine *uc);
+
+/*
  Register callback for a hook event.
  The callback will be run when the hook event is hit.
 

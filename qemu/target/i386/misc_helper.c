@@ -123,11 +123,9 @@ void helper_cpuid(CPUX86State *env)
         // Multiple cpuid callbacks returning different values is undefined.
         // true -> skip the cpuid instruction
         if (hook->insn == UC_X86_INS_CPUID) {
-            uintptr_t pc = GETPC();
-            if (!synced && !uc->skip_sync_pc_on_exit && pc) {
-                cpu_restore_state(uc->cpu, pc, false);
-                synced = true;
-            }
+            // Unicorn (mojave): the translator already stored eip and cc_op
+            // before this helper, so there's no state to restore (and the
+            // search for it was slow).
             JIT_CALLBACK_GUARD_VAR(skip_cpuid, ((uc_cb_insn_cpuid_t)hook->callback)(env->uc, hook->user_data));
         }
 

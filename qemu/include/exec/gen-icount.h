@@ -32,6 +32,18 @@ static inline void gen_io_end(TCGContext *tcg_ctx)
 
 static inline void gen_tb_start(TCGContext *tcg_ctx, TranslationBlock *tb)
 {
+    // Unicorn (mojave): with exit checks off, test the exit flag inline like
+    // upstream QEMU instead of calling a helper at the start of every block.
+    tcg_ctx->exitreq_label = NULL;
+    if (tcg_ctx->uc->no_exit_request && tcg_ctx->delay_slot_flag == NULL) {
+        TCGv_i32 count = tcg_temp_new_i32(tcg_ctx);
+        tcg_ctx->exitreq_label = gen_new_label(tcg_ctx);
+        tcg_gen_ld_i32(tcg_ctx, count, tcg_ctx->cpu_env,
+                       offsetof(ArchCPU, neg.icount_decr.u32) - offsetof(ArchCPU, env));
+        tcg_gen_brcondi_i32(tcg_ctx, TCG_COND_LT, count, 0, tcg_ctx->exitreq_label);
+        tcg_temp_free_i32(tcg_ctx, count);
+        return;
+    }
     TCGv_ptr puc = tcg_const_ptr(tcg_ctx, tcg_ctx->uc);
     TCGv_i32 tmp = tcg_const_i32(tcg_ctx, 0);
     // Unicorn:
@@ -57,6 +69,10 @@ static inline void gen_tb_end(TCGContext *tcg_ctx, TranslationBlock *tb, int num
         tcg_set_insn_param(tcg_ctx->icount_start_insn, 1, num_insns);
     }
 
+    if (tcg_ctx->exitreq_label) {
+        gen_set_label(tcg_ctx, tcg_ctx->exitreq_label);
+        tcg_ctx->exitreq_label = NULL;
+    }
     tcg_gen_exit_tb(tcg_ctx, tb, TB_EXIT_REQUESTED);
 }
 

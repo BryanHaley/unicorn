@@ -1208,8 +1208,11 @@ static void notdirty_write(CPUState *cpu, vaddr mem_vaddr, unsigned size,
     // - have memory hooks installed
     // - or doing snapshot
     // , then never clean the tlb
+    // Unicorn (mojave): x86 without paging gives every TLB entry addr_code, so
+    // that test kept every page on the slow store path. Use the region's
+    // execute permission instead; executable pages still get SMC checks.
     if (!(!mr || (tlbe->addr_write != -1 && mr->priority < cpu->uc->snapshot_level)) &&
-            !(tlbe->addr_code != -1) &&
+            !(mr->perms & UC_PROT_EXEC) &&
             !uc_mem_hook_installed(cpu->uc, tlbe->paddr | (mem_vaddr & ~TARGET_PAGE_MASK))) {
         tlb_set_dirty(cpu, mem_vaddr);
     }

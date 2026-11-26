@@ -36,10 +36,7 @@ void cpu_reloading_memory_map(void)
 
 void cpu_loop_exit(CPUState *cpu)
 {
-    /* Unlock JIT write protect if applicable. */
-    if (cpu->uc->nested_level == 1) {
-        tb_exec_unlock(cpu->uc);
-    }
+    /* Unicorn (mojave): no JIT unlock here; see cpu_tb_exec. */
     /* Undo the setting in cpu_tb_exec.  */
     cpu->can_do_io = 1;
     siglongjmp(cpu->uc->jmp_bufs[cpu->uc->nested_level - 1], 1);

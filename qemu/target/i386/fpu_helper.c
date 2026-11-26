@@ -26,6 +26,196 @@
 #include "exec/cpu_ldst.h"
 #include "fpu/softfloat.h"
 
+/*
+ * Unicorn (mojave): x87 arithmetic on host doubles. Software 80-bit floats
+ * were most of the time spent in 32-bit games. Ordinary finite numbers with
+ * round-to-nearest go through the host FPU (so results have double, not
+ * extended, precision); NaNs, infinities, denormals, values outside double
+ * range and other rounding modes still take the exact software path.
+ */
+static inline bool mj_fx_to_d(floatx80 a, double *out)
+{
+    uint64_t m = a.low, f, frac, rem, b;
+    int e = a.high & 0x7fff, de;
+    uint64_t sign = (uint64_t)((a.high >> 15) & 1) << 63;
+
+    if (e == 0) {
+        if (m != 0) {
+            return false;
+        }
+        memcpy(out, &sign, 8);
+        return true;
+    }
+    if (e == 0x7fff || !(m >> 63)) {
+        return false;
+    }
+    de = e - 16383 + 1023;
+    if (de <= 0 || de >= 2047) {
+        return false;
+    }
+    f = m << 1;
+    frac = f >> 12;
+    rem = f & 0xfff;
+    if (rem > 0x800 || (rem == 0x800 && (frac & 1))) {
+        frac++;
+        if (frac >> 52) {
+            frac = 0;
+            if (++de >= 2047) {
+                return false;
+            }
+        }
+    }
+    b = sign | ((uint64_t)de << 52) | frac;
+    memcpy(out, &b, 8);
+    return true;
+}
+
+static inline bool mj_d_to_fx(double d, floatx80 *out)
+{
+    uint64_t b, frac;
+    int e;
+    uint16_t sign;
+
+    memcpy(&b, &d, 8);
+    e = (b >> 52) & 0x7ff;
+    frac = b & ((1ULL << 52) - 1);
+    sign = (uint16_t)((b >> 63) << 15);
+    if (e == 0) {
+        if (frac) {
+            return false;
+        }
+        out->low = 0;
+        out->high = sign;
+        return true;
+    }
+    if (e == 2047) {
+        return false;
+    }
+    out->high = sign | (uint16_t)(e - 1023 + 16383);
+    out->low = (1ULL << 63) | (frac << 11);
+    return true;
+}
+
+#define MJ_FX_OP(name, op, slow)                                              \
+static floatx80 name(floatx80 a, floatx80 b, float_status *s)                 \
+{                                                                             \
+    double x, y;                                                              \
+    floatx80 r;                                                               \
+    if (s->float_rounding_mode == float_round_nearest_even &&                \
+        mj_fx_to_d(a, &x) && mj_fx_to_d(b, &y) && mj_d_to_fx(x op y, &r)) {   \
+        return r;                                                             \
+    }                                                                         \
+    return slow(a, b, s);                                                     \
+}
+
+MJ_FX_OP(mj_fx_add, +, floatx80_add)
+MJ_FX_OP(mj_fx_sub, -, floatx80_sub)
+MJ_FX_OP(mj_fx_mul, *, floatx80_mul)
+MJ_FX_OP(mj_fx_div, /, floatx80_div)
+
+static floatx80 mj_fx_sqrt(floatx80 a, float_status *s)
+{
+    double x;
+    floatx80 r;
+    if (s->float_rounding_mode == float_round_nearest_even &&
+        mj_fx_to_d(a, &x) && x >= 0 && mj_d_to_fx(sqrt(x), &r)) {
+        return r;
+    }
+    return floatx80_sqrt(a, s);
+}
+
+static int mj_fx_cmp(floatx80 a, floatx80 b, float_status *s, bool quiet)
+{
+    double x, y;
+    if (mj_fx_to_d(a, &x) && mj_fx_to_d(b, &y)) {
+        return x < y ? float_relation_less : x > y ? float_relation_greater : float_relation_equal;
+    }
+    return quiet ? floatx80_compare_quiet(a, b, s) : floatx80_compare(a, b, s);
+}
+static int mj_fx_compare(floatx80 a, floatx80 b, float_status *s) { return mj_fx_cmp(a, b, s, false); }
+static int mj_fx_compare_quiet(floatx80 a, floatx80 b, float_status *s) { return mj_fx_cmp(a, b, s, true); }
+
+static floatx80 mj_f32_to_fx(float32 a, float_status *s)
+{
+    float f;
+    floatx80 r;
+    uint32_t bits = float32_val(a);
+    uint32_t e = (bits >> 23) & 0xff;
+    if (e != 0 && e != 0xff) {
+        memcpy(&f, &bits, 4);
+        if (mj_d_to_fx((double)f, &r)) {
+            return r;
+        }
+    } else if ((bits & 0x7fffffff) == 0) {
+        r.low = 0;
+        r.high = (uint16_t)((bits >> 31) << 15);
+        return r;
+    }
+    return float32_to_floatx80(a, s);
+}
+
+static floatx80 mj_f64_to_fx(float64 a, float_status *s)
+{
+    double d;
+    floatx80 r;
+    uint64_t bits = float64_val(a);
+    memcpy(&d, &bits, 8);
+    if (mj_d_to_fx(d, &r)) {
+        return r;
+    }
+    return float64_to_floatx80(a, s);
+}
+
+static float32 mj_fx_to_f32(floatx80 a, float_status *s)
+{
+    double x;
+    float f;
+    uint32_t bits;
+    if (s->float_rounding_mode == float_round_nearest_even && mj_fx_to_d(a, &x)) {
+        f = (float)x;
+        memcpy(&bits, &f, 4);
+        uint32_t e = (bits >> 23) & 0xff;
+        if ((e != 0 && e != 0xff) || (bits & 0x7fffffff) == 0) {
+            return make_float32(bits);
+        }
+    }
+    return floatx80_to_float32(a, s);
+}
+
+static float64 mj_fx_to_f64(floatx80 a, float_status *s)
+{
+    double x;
+    uint64_t bits;
+    if (s->float_rounding_mode == float_round_nearest_even && mj_fx_to_d(a, &x)) {
+        memcpy(&bits, &x, 8);
+        return make_float64(bits);
+    }
+    return floatx80_to_float64(a, s);
+}
+
+#undef floatx80_add
+#define floatx80_add mj_fx_add
+#undef floatx80_sub
+#define floatx80_sub mj_fx_sub
+#undef floatx80_mul
+#define floatx80_mul mj_fx_mul
+#undef floatx80_div
+#define floatx80_div mj_fx_div
+#undef floatx80_sqrt
+#define floatx80_sqrt mj_fx_sqrt
+#undef floatx80_compare
+#define floatx80_compare mj_fx_compare
+#undef floatx80_compare_quiet
+#define floatx80_compare_quiet mj_fx_compare_quiet
+#undef float32_to_floatx80
+#define float32_to_floatx80 mj_f32_to_fx
+#undef float64_to_floatx80
+#define float64_to_floatx80 mj_f64_to_fx
+#undef floatx80_to_float32
+#define floatx80_to_float32 mj_fx_to_f32
+#undef floatx80_to_float64
+#define floatx80_to_float64 mj_fx_to_f64
+
 #define FPU_RC_MASK         0xc00
 #define FPU_RC_NEAR         0x000
 #define FPU_RC_DOWN         0x400
