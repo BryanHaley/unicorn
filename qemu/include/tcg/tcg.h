@@ -612,6 +612,8 @@ struct tcg_region_state {
     size_t agg_size_full; /* aggregate size of full regions */
 };
 
+#define MJ_TRAMP_MAX 2048
+
 struct TCGContext {
     uint8_t *pool_cur, *pool_end;
     TCGPool *pool_first, *pool_current, *pool_first_large;
@@ -691,6 +693,10 @@ struct TCGContext {
     /* qemu/include/exec/gen-icount.h */
     TCGOp *icount_start_insn;
     TCGLabel *exitreq_label; /* Unicorn (mojave): inline exit check */
+    /* Unicorn (mojave): helper call trampolines after the prologue */
+    tcg_insn_unit *mj_tramp;
+    int mj_ntramp;
+    uint16_t mj_tramp_hash[4096];
     /* qemu/tcg/tcg.c */
     GHashTable *helper_table;
     GHashTable *custom_helper_infos; // To support inline hooks.

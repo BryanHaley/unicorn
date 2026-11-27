@@ -2452,8 +2452,137 @@ static inline int insn_const_size(MemOp ot)
     }
 }
 
+/*
+ * Unicorn (mojave): the x87 stack moves inline instead of as helper calls.
+ * They only shuffle fpstt, fptags and 10-byte registers, and are among the
+ * most frequent calls in 32-bit games.
+ */
+static TCGv_ptr mj_st_ptr(TCGContext *tcg_ctx, TCGv_i32 n)
+{
+    TCGv_i32 t = tcg_temp_new_i32(tcg_ctx);
+    TCGv_ptr p = tcg_temp_new_ptr(tcg_ctx);
+    tcg_gen_ld_i32(tcg_ctx, t, tcg_ctx->cpu_env, offsetof(CPUX86State, fpstt));
+    if (n) {
+        tcg_gen_add_i32(tcg_ctx, t, t, n);
+    }
+    tcg_gen_andi_i32(tcg_ctx, t, t, 7);
+    tcg_gen_muli_i32(tcg_ctx, t, t, sizeof(FPReg));
+    tcg_gen_ext_i32_ptr(tcg_ctx, p, t);
+    tcg_gen_add_ptr(tcg_ctx, p, p, tcg_ctx->cpu_env);
+    tcg_temp_free_i32(tcg_ctx, t);
+    return p; /* + offsetof(CPUX86State, fpregs) is that register */
+}
+
+#define MJ_FPREGS offsetof(CPUX86State, fpregs)
+#define MJ_FT0 offsetof(CPUX86State, ft0)
+
+static void mj_fx_copy(TCGContext *tcg_ctx, TCGv_ptr dst, intptr_t doff,
+                       TCGv_ptr src, intptr_t soff)
+{
+    TCGv_i64 lo = tcg_temp_new_i64(tcg_ctx);
+    TCGv_i32 hi = tcg_temp_new_i32(tcg_ctx);
+    tcg_gen_ld_i64(tcg_ctx, lo, src, soff);
+    tcg_gen_ld16u_i32(tcg_ctx, hi, src, soff + 8);
+    tcg_gen_st_i64(tcg_ctx, lo, dst, doff);
+    tcg_gen_st16_i32(tcg_ctx, hi, dst, doff + 8);
+    tcg_temp_free_i64(tcg_ctx, lo);
+    tcg_temp_free_i32(tcg_ctx, hi);
+}
+
+static void mj_gen_fpush(TCGContext *tcg_ctx, TCGv_ptr env)
+{
+    TCGv_i32 t = tcg_temp_new_i32(tcg_ctx);
+    TCGv_ptr p = tcg_temp_new_ptr(tcg_ctx);
+    tcg_gen_ld_i32(tcg_ctx, t, env, offsetof(CPUX86State, fpstt));
+    tcg_gen_subi_i32(tcg_ctx, t, t, 1);
+    tcg_gen_andi_i32(tcg_ctx, t, t, 7);
+    tcg_gen_st_i32(tcg_ctx, t, env, offsetof(CPUX86State, fpstt));
+    tcg_gen_ext_i32_ptr(tcg_ctx, p, t);
+    tcg_gen_add_ptr(tcg_ctx, p, p, env);
+    tcg_gen_movi_i32(tcg_ctx, t, 0);
+    tcg_gen_st8_i32(tcg_ctx, t, p, offsetof(CPUX86State, fptags));
+    tcg_temp_free_i32(tcg_ctx, t);
+    tcg_temp_free_ptr(tcg_ctx, p);
+}
+
+static void mj_gen_fpop(TCGContext *tcg_ctx, TCGv_ptr env)
+{
+    TCGv_i32 t = tcg_temp_new_i32(tcg_ctx);
+    TCGv_i32 one = tcg_const_i32(tcg_ctx, 1);
+    TCGv_ptr p = tcg_temp_new_ptr(tcg_ctx);
+    tcg_gen_ld_i32(tcg_ctx, t, env, offsetof(CPUX86State, fpstt));
+    tcg_gen_ext_i32_ptr(tcg_ctx, p, t);
+    tcg_gen_add_ptr(tcg_ctx, p, p, env);
+    tcg_gen_st8_i32(tcg_ctx, one, p, offsetof(CPUX86State, fptags));
+    tcg_gen_addi_i32(tcg_ctx, t, t, 1);
+    tcg_gen_andi_i32(tcg_ctx, t, t, 7);
+    tcg_gen_st_i32(tcg_ctx, t, env, offsetof(CPUX86State, fpstt));
+    tcg_temp_free_i32(tcg_ctx, t);
+    tcg_temp_free_i32(tcg_ctx, one);
+    tcg_temp_free_ptr(tcg_ctx, p);
+}
+
+static void mj_gen_fxchg_ST0_STN(TCGContext *tcg_ctx, TCGv_ptr env, TCGv_i32 n)
+{
+    TCGv_ptr p0 = mj_st_ptr(tcg_ctx, NULL), pn = mj_st_ptr(tcg_ctx, n);
+    TCGv_i64 lo = tcg_temp_new_i64(tcg_ctx);
+    TCGv_i32 hi = tcg_temp_new_i32(tcg_ctx);
+    tcg_gen_ld_i64(tcg_ctx, lo, pn, MJ_FPREGS);
+    tcg_gen_ld16u_i32(tcg_ctx, hi, pn, MJ_FPREGS + 8);
+    mj_fx_copy(tcg_ctx, pn, MJ_FPREGS, p0, MJ_FPREGS);
+    tcg_gen_st_i64(tcg_ctx, lo, p0, MJ_FPREGS);
+    tcg_gen_st16_i32(tcg_ctx, hi, p0, MJ_FPREGS + 8);
+    tcg_temp_free_i64(tcg_ctx, lo);
+    tcg_temp_free_i32(tcg_ctx, hi);
+    tcg_temp_free_ptr(tcg_ctx, p0);
+    tcg_temp_free_ptr(tcg_ctx, pn);
+}
+
+static void mj_gen_fmov_ST0_FT0(TCGContext *tcg_ctx, TCGv_ptr env)
+{
+    TCGv_ptr p0 = mj_st_ptr(tcg_ctx, NULL);
+    mj_fx_copy(tcg_ctx, p0, MJ_FPREGS, env, MJ_FT0);
+    tcg_temp_free_ptr(tcg_ctx, p0);
+}
+
+static void mj_gen_fmov_FT0_STN(TCGContext *tcg_ctx, TCGv_ptr env, TCGv_i32 n)
+{
+    TCGv_ptr pn = mj_st_ptr(tcg_ctx, n);
+    mj_fx_copy(tcg_ctx, env, MJ_FT0, pn, MJ_FPREGS);
+    tcg_temp_free_ptr(tcg_ctx, pn);
+}
+
+static void mj_gen_fmov_ST0_STN(TCGContext *tcg_ctx, TCGv_ptr env, TCGv_i32 n)
+{
+    TCGv_ptr p0 = mj_st_ptr(tcg_ctx, NULL), pn = mj_st_ptr(tcg_ctx, n);
+    mj_fx_copy(tcg_ctx, p0, MJ_FPREGS, pn, MJ_FPREGS);
+    tcg_temp_free_ptr(tcg_ctx, p0);
+    tcg_temp_free_ptr(tcg_ctx, pn);
+}
+
+static void mj_gen_fmov_STN_ST0(TCGContext *tcg_ctx, TCGv_ptr env, TCGv_i32 n)
+{
+    TCGv_ptr p0 = mj_st_ptr(tcg_ctx, NULL), pn = mj_st_ptr(tcg_ctx, n);
+    mj_fx_copy(tcg_ctx, pn, MJ_FPREGS, p0, MJ_FPREGS);
+    tcg_temp_free_ptr(tcg_ctx, p0);
+    tcg_temp_free_ptr(tcg_ctx, pn);
+}
+
+#define gen_helper_fpush mj_gen_fpush
+#define gen_helper_fpop mj_gen_fpop
+#define gen_helper_fxchg_ST0_STN mj_gen_fxchg_ST0_STN
+#define gen_helper_fmov_ST0_FT0 mj_gen_fmov_ST0_FT0
+#define gen_helper_fmov_FT0_STN mj_gen_fmov_FT0_STN
+#define gen_helper_fmov_ST0_STN mj_gen_fmov_ST0_STN
+#define gen_helper_fmov_STN_ST0 mj_gen_fmov_STN_ST0
+
 static inline bool use_goto_tb(DisasContext *s, target_ulong pc)
 {
+    // Unicorn (mojave): flat guest memory has no paging to change under a
+    // chained jump, so jumps to other pages can chain too.
+    if (s->uc->mj_direct) {
+        return true;
+    }
     return (pc & TARGET_PAGE_MASK) == (s->base.tb->pc & TARGET_PAGE_MASK) ||
            (pc & TARGET_PAGE_MASK) == (s->pc_start & TARGET_PAGE_MASK);
 }

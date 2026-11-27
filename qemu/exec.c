@@ -1264,6 +1264,7 @@ RAMBlock *qemu_ram_block_from_host(struct uc_struct *uc, void *ptr,
             continue;
         }
         if (host - block->host < block->max_length) {
+            uc->ram_list.mru_block = block;
             goto found;
         }
     }

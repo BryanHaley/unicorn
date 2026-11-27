@@ -856,6 +856,12 @@ void tcg_prologue_init(TCGContext *s)
     }
 #endif
 
+    /* Unicorn (mojave): room for helper trampolines, kept across flushes */
+    s->mj_tramp = (tcg_insn_unit *)QEMU_ALIGN_PTR_UP(s->code_ptr, 16);
+    s->mj_ntramp = 0;
+    memset(s->mj_tramp_hash, 0, sizeof(s->mj_tramp_hash));
+    s->code_ptr = s->mj_tramp + MJ_TRAMP_MAX * 4;
+
     buf1 = s->code_ptr;
     flush_icache_range((uintptr_t)buf0, (uintptr_t)buf1);
 

@@ -1335,11 +1335,47 @@ static inline void tcg_out_callr(TCGContext *s, TCGReg reg)
     tcg_out_insn(s, 3207, BLR, reg);
 }
 
+/*
+ * Unicorn (mojave): a trampoline (ldr x16, #8; br x16; .quad target) near
+ * the code, so far helpers are reached with a direct bl. An indirect blr at
+ * every call site predicts badly; one br per helper always goes one place.
+ */
+static tcg_insn_unit *mj_tramp_for(TCGContext *s, tcg_insn_unit *target)
+{
+    uintptr_t t = (uintptr_t)target;
+    unsigned h = (t >> 2) & 4095;
+    for (int i = 0; i < 4096; i++, h = (h + 1) & 4095) {
+        int k = s->mj_tramp_hash[h];
+        if (!k) {
+            break;
+        }
+        tcg_insn_unit *p = s->mj_tramp + (k - 1) * 4;
+        if (((uint64_t)p[3] << 32 | p[2]) == t) {
+            return p;
+        }
+    }
+    if (!s->mj_tramp || s->mj_ntramp >= MJ_TRAMP_MAX) {
+        return NULL;
+    }
+    tcg_insn_unit *p = s->mj_tramp + s->mj_ntramp * 4;
+    p[0] = 0x58000050; /* ldr x16, #8 */
+    p[1] = 0xd61f0200; /* br x16 */
+    p[2] = (uint32_t)t;
+    p[3] = (uint32_t)(t >> 32);
+    flush_icache_range((uintptr_t)p, (uintptr_t)(p + 4));
+    s->mj_tramp_hash[h] = ++s->mj_ntramp;
+    return p;
+}
+
 static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *target)
 {
     ptrdiff_t offset = target - s->code_ptr;
+    tcg_insn_unit *tramp;
     if (offset == sextract64(offset, 0, 26)) {
         tcg_out_insn(s, 3206, BL, offset);
+    } else if ((tramp = mj_tramp_for(s, target)) != NULL &&
+               (tramp - s->code_ptr) == sextract64(tramp - s->code_ptr, 0, 26)) {
+        tcg_out_insn(s, 3206, BL, tramp - s->code_ptr);
     } else {
         tcg_out_movi(s, TCG_TYPE_I64, TCG_REG_TMP, (intptr_t)target);
         tcg_out_callr(s, TCG_REG_TMP);
@@ -1823,6 +1859,11 @@ static void tcg_out_qemu_ld(TCGContext *s, TCGReg data_reg, TCGReg addr_reg,
     unsigned mem_index = get_mmuidx(oi);
     tcg_insn_unit *label_ptr;
 
+    if (s->uc->mj_direct) {
+        tcg_out_qemu_ld_direct(s, memop, ext, data_reg,
+                               TCG_REG_X28, TCG_TYPE_I64, addr_reg);
+        return;
+    }
     tcg_out_tlb_read(s, addr_reg, memop, &label_ptr, mem_index, 1);
     tcg_out_qemu_ld_direct(s, memop, ext, data_reg,
                            TCG_REG_X1, otype, addr_reg);
@@ -1848,6 +1889,11 @@ static void tcg_out_qemu_st(TCGContext *s, TCGReg data_reg, TCGReg addr_reg,
     unsigned mem_index = get_mmuidx(oi);
     tcg_insn_unit *label_ptr;
 
+    if (s->uc->mj_direct) {
+        tcg_out_qemu_st_direct(s, memop, data_reg,
+                               TCG_REG_X28, TCG_TYPE_I64, addr_reg);
+        return;
+    }
     tcg_out_tlb_read(s, addr_reg, memop, &label_ptr, mem_index, 0);
     tcg_out_qemu_st_direct(s, memop, data_reg,
                            TCG_REG_X1, otype, addr_reg);
@@ -2802,6 +2848,7 @@ static void tcg_target_init(TCGContext *s)
     tcg_regset_set_reg(s->reserved_regs, TCG_REG_TMP);
     tcg_regset_set_reg(s->reserved_regs, TCG_REG_X18); /* platform register */
     tcg_regset_set_reg(s->reserved_regs, TCG_VEC_TMP);
+    tcg_regset_set_reg(s->reserved_regs, TCG_REG_X28); /* mj_direct_base */
 }
 
 /* Saving pairs: (X19, X20) .. (X27, X28), (X29(fp), X30(lr)).  */
@@ -2844,6 +2891,10 @@ static void tcg_target_qemu_prologue(TCGContext *s)
     /* Inform TCG about how to find TCG locals with register, offset, size.  */
     tcg_set_frame(s, TCG_REG_SP, TCG_STATIC_CALL_ARGS_SIZE,
                   CPU_TEMP_BUF_NLONGS * sizeof(long));
+
+    /* Unicorn (mojave): read at run time, it's set after the prologue is made */
+    tcg_out_movi(s, TCG_TYPE_PTR, TCG_REG_X28, (uintptr_t)&s->uc->mj_direct_base);
+    tcg_out_ld(s, TCG_TYPE_PTR, TCG_REG_X28, TCG_REG_X28, 0);
 
 #if !defined(CONFIG_SOFTMMU)
     if (USE_GUEST_BASE) {

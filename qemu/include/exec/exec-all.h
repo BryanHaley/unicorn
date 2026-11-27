@@ -375,9 +375,11 @@ static inline uint32_t tb_cflags(const TranslationBlock *tb)
 }
 
 /* current cflags for hashing/comparison */
+/* Unicorn (mojave): CF_PARALLEL when guest threads run at the same time */
+extern uint32_t mj_parallel_cflags;
 static inline uint32_t curr_cflags(void)
 {
-    return 0;
+    return mj_parallel_cflags;
 }
 
 /* TranslationBlock invalidate API */

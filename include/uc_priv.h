@@ -410,6 +410,9 @@ struct uc_struct {
                       // default)
     bool first_tb; // is this the first Translation-Block ever generated since
                    // uc_emu_start()?
+    // Unicorn (mojave): guest address g is at host mj_direct_base + g
+    bool mj_direct;
+    uintptr_t mj_direct_base;
     bool no_exit_request; // Disable check_exit_request temporarily. A
                           // workaround to treat the IT block as a whole block.
     bool init_done;       // Whether the initialization is done.

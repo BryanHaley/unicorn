@@ -2874,6 +2874,12 @@ void check_exit_request(TCGContext *tcg_ctx)
 
 static void tcg_gen_req_mo(TCGContext *tcg_ctx, TCGBar type)
 {
+    /*
+     * Unicorn (mojave): no barrier around every guest load and store. Locked
+     * instructions and fences still order memory; plain accesses get the
+     * host's weaker ordering, which code that synchronizes properly is fine with.
+     */
+    return;
 #ifdef TCG_GUEST_DEFAULT_MO
     type &= TCG_GUEST_DEFAULT_MO;
 #endif

@@ -1083,6 +1083,23 @@ int uc_mojave_jit_write_begin(void);
 UNICORN_EXPORT
 void uc_mojave_jit_write_end(int prev);
 
+/*
+ Unicorn (mojave): guest memory is one flat block at host address base, so
+ translated code loads and stores base + address directly, skipping the TLB.
+ Memory hooks, unmapped-access errors and checks for writes to translated code
+ no longer happen for those accesses. Call before running anything.
+*/
+UNICORN_EXPORT
+void uc_mojave_direct_memory(uc_engine *uc, void *base);
+
+/*
+ Unicorn (mojave): translate for engines that run at the same time on
+ several threads (locked instructions become host atomics). Call before any
+ engine translates code.
+*/
+UNICORN_EXPORT
+void uc_mojave_parallel(void);
+
 /* Unicorn (mojave): the address of the last invalid memory access. */
 UNICORN_EXPORT
 uint64_t uc_mojave_invalid_addr(uc_engine *uc);

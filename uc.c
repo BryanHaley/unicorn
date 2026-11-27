@@ -1290,6 +1290,21 @@ void uc_mojave_jit_write_end(int prev)
     jit_write_protect(prev);
 }
 
+uint32_t mj_parallel_cflags;
+
+UNICORN_EXPORT
+void uc_mojave_parallel(void)
+{
+    mj_parallel_cflags = 0x00080000; // CF_PARALLEL
+}
+
+UNICORN_EXPORT
+void uc_mojave_direct_memory(uc_engine *uc, void *base)
+{
+    uc->mj_direct_base = (uintptr_t)base;
+    uc->mj_direct = true;
+}
+
 UNICORN_EXPORT
 uint64_t uc_mojave_invalid_addr(uc_engine *uc)
 {

@@ -604,10 +604,46 @@ void glue(helper_pshufhw, SUFFIX)(Reg *d, Reg *s, int order)
         d->ZMM_D(0) = F(64, d->ZMM_D(0), s->ZMM_D(0));                  \
     }
 
-#define FPU_ADD(size, a, b) float ## size ## _add(a, b, &env->sse_status)
-#define FPU_SUB(size, a, b) float ## size ## _sub(a, b, &env->sse_status)
-#define FPU_MUL(size, a, b) float ## size ## _mul(a, b, &env->sse_status)
-#define FPU_DIV(size, a, b) float ## size ## _div(a, b, &env->sse_status)
+/*
+ * Unicorn (mojave): SSE arithmetic on the host FPU. MXCSR exception flags are
+ * never reported here, so with round-to-nearest and no DAZ the host gives the
+ * same bits; NaN results take the software path for x86's NaN rules.
+ */
+#ifndef MJ_SSE_HOST_MATH
+#define MJ_SSE_HOST_MATH
+#define MJ_SSE_OP(size, ctype, name, op)                                      \
+static inline float ## size mj_sse_ ## name ## size(float ## size a,         \
+                                                    float ## size b,         \
+                                                    float_status *s)         \
+{                                                                             \
+    if (s->float_rounding_mode == float_round_nearest_even &&                 \
+        !s->flush_inputs_to_zero) {                                           \
+        ctype x, y, r;                                                        \
+        float ## size out;                                                    \
+        memcpy(&x, &a, sizeof x);                                             \
+        memcpy(&y, &b, sizeof y);                                             \
+        r = x op y;                                                           \
+        if (r == r) {                                                         \
+            memcpy(&out, &r, sizeof out);                                     \
+            return out;                                                       \
+        }                                                                     \
+    }                                                                         \
+    return float ## size ## _ ## name(a, b, s);                               \
+}
+MJ_SSE_OP(32, float, add, +)
+MJ_SSE_OP(32, float, sub, -)
+MJ_SSE_OP(32, float, mul, *)
+MJ_SSE_OP(32, float, div, /)
+MJ_SSE_OP(64, double, add, +)
+MJ_SSE_OP(64, double, sub, -)
+MJ_SSE_OP(64, double, mul, *)
+MJ_SSE_OP(64, double, div, /)
+#endif
+
+#define FPU_ADD(size, a, b) mj_sse_add ## size(a, b, &env->sse_status)
+#define FPU_SUB(size, a, b) mj_sse_sub ## size(a, b, &env->sse_status)
+#define FPU_MUL(size, a, b) mj_sse_mul ## size(a, b, &env->sse_status)
+#define FPU_DIV(size, a, b) mj_sse_div ## size(a, b, &env->sse_status)
 #define FPU_SQRT(size, a, b) float ## size ## _sqrt(b, &env->sse_status)
 
 /* Note that the choice of comparison op here is important to get the
@@ -646,13 +682,29 @@ void helper_cvtpd2ps(CPUX86State *env, Reg *d, Reg *s)
     d->Q(1) = 0;
 }
 
+/* Unicorn (mojave): host conversion with round-to-nearest, no DAZ and no NaN */
 void helper_cvtss2sd(CPUX86State *env, Reg *d, Reg *s)
 {
+    float x;
+    memcpy(&x, &s->ZMM_S(0), 4);
+    if (!env->sse_status.flush_inputs_to_zero && x == x) {
+        double r = x;
+        memcpy(&d->ZMM_D(0), &r, 8);
+        return;
+    }
     d->ZMM_D(0) = float32_to_float64(s->ZMM_S(0), &env->sse_status);
 }
 
 void helper_cvtsd2ss(CPUX86State *env, Reg *d, Reg *s)
 {
+    double x;
+    memcpy(&x, &s->ZMM_D(0), 8);
+    if (env->sse_status.float_rounding_mode == float_round_nearest_even &&
+        !env->sse_status.flush_inputs_to_zero && x == x) {
+        float r = (float)x;
+        memcpy(&d->ZMM_S(0), &r, 4);
+        return;
+    }
     d->ZMM_S(0) = float64_to_float32(s->ZMM_D(0), &env->sse_status);
 }
 
@@ -1029,6 +1081,24 @@ SSE_HELPER_CMP(cmpord, FPU_CMPORD)
 
 static const int comis_eflags[4] = {CC_C, CC_Z, 0, CC_Z | CC_P | CC_C};
 
+/* Unicorn (mojave): compare on the host FPU unless a NaN or DAZ is involved */
+#define MJ_SSE_CMP(size, ctype)                                               \
+static inline int mj_sse_cmp ## size(float ## size a, float ## size b,       \
+                                     float_status *s, bool quiet)            \
+{                                                                             \
+    ctype x, y;                                                               \
+    memcpy(&x, &a, sizeof x);                                                 \
+    memcpy(&y, &b, sizeof y);                                                 \
+    if (!s->flush_inputs_to_zero && x == x && y == y) {                       \
+        return x < y ? float_relation_less                                    \
+             : x > y ? float_relation_greater : float_relation_equal;        \
+    }                                                                         \
+    return quiet ? float ## size ## _compare_quiet(a, b, s)                   \
+                 : float ## size ## _compare(a, b, s);                        \
+}
+MJ_SSE_CMP(32, float)
+MJ_SSE_CMP(64, double)
+
 void helper_ucomiss(CPUX86State *env, Reg *d, Reg *s)
 {
     int ret;
@@ -1036,7 +1106,7 @@ void helper_ucomiss(CPUX86State *env, Reg *d, Reg *s)
 
     s0 = d->ZMM_S(0);
     s1 = s->ZMM_S(0);
-    ret = float32_compare_quiet(s0, s1, &env->sse_status);
+    ret = mj_sse_cmp32(s0, s1, &env->sse_status, true);
     CC_SRC = comis_eflags[ret + 1];
 }
 
@@ -1047,7 +1117,7 @@ void helper_comiss(CPUX86State *env, Reg *d, Reg *s)
 
     s0 = d->ZMM_S(0);
     s1 = s->ZMM_S(0);
-    ret = float32_compare(s0, s1, &env->sse_status);
+    ret = mj_sse_cmp32(s0, s1, &env->sse_status, false);
     CC_SRC = comis_eflags[ret + 1];
 }
 
@@ -1058,7 +1128,7 @@ void helper_ucomisd(CPUX86State *env, Reg *d, Reg *s)
 
     d0 = d->ZMM_D(0);
     d1 = s->ZMM_D(0);
-    ret = float64_compare_quiet(d0, d1, &env->sse_status);
+    ret = mj_sse_cmp64(d0, d1, &env->sse_status, true);
     CC_SRC = comis_eflags[ret + 1];
 }
 
@@ -1069,7 +1139,7 @@ void helper_comisd(CPUX86State *env, Reg *d, Reg *s)
 
     d0 = d->ZMM_D(0);
     d1 = s->ZMM_D(0);
-    ret = float64_compare(d0, d1, &env->sse_status);
+    ret = mj_sse_cmp64(d0, d1, &env->sse_status, false);
     CC_SRC = comis_eflags[ret + 1];
 }
 
